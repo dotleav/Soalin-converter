@@ -168,7 +168,7 @@
 
 <header>
   <h1>Soalin — Konverter Docx (di HP/tablet, tanpa terminal)</h1>
-  <p>Halaman ini menjalankan konversi docx → questions.js + gambar langsung di browser kamu (tidak ada file yang dikirim ke server manapun). Hasilnya bisa diunduh sebagai satu file <code>.tar.gz</code> yang siap ditaruh di repo lewat GitHub Codespaces.</p>
+  <p>Halaman ini menjalankan konversi docx → questions.js + gambar langsung di browser kamu (tidak ada file yang dikirim ke server manapun). Hasilnya bisa diunduh sebagai satu file <code>.patch</code> yang tinggal di-<code>git am</code> / <code>git apply</code> ke repo Soalin (gambar ikut, sebagai binary patch).</p>
 </header>
 
 <main>
@@ -198,19 +198,25 @@
   <div class="card" id="batchCard" style="display:none">
     <h2><span class="step-num">2</span> Batch saat ini</h2>
     <div id="batchList"></div>
-    <div class="hint">Bisa ulangi Langkah 1 untuk konversi beberapa file docx sekaligus sebelum diunduh — semuanya akan digabung jadi satu .tar.gz.</div>
+    <div class="hint">Bisa ulangi Langkah 1 untuk konversi beberapa file docx sekaligus sebelum diunduh — semuanya akan digabung jadi satu .patch.</div>
   </div>
 
   <div class="card">
-    <h2><span class="step-num">3</span> (Opsional) Gabung dengan manifest lama</h2>
-    <div class="hint">Kalau repo kamu sudah punya paket lain di <code>data/manifest.js</code>, tempel isinya di sini supaya paket baru ditambahkan, bukan menimpa daftar lama.</div>
-    <textarea id="existingManifest" placeholder="export const packages = [ ... ];"></textarea>
+    <h2><span class="step-num">3</span> Repo tujuan</h2>
+    <label for="repoRef">Repo Soalin (<code>owner/repo@branch</code>)</label>
+    <input type="text" id="repoRef" value="dotleav/Soalin@main">
+    <div class="hint">Patch dibuat sebagai <em>diff</em> terhadap <code>data/manifest.js</code> (dan <code>questions.js</code> kalau sudah ada) di repo ini — diambil otomatis dari GitHub saat unduh, jadi patch cocok dengan isi repo yang sekarang.</div>
+    <details>
+      <summary>Offline / repo private? Tempel manifest lama manual</summary>
+      <textarea id="existingManifest" placeholder="export const packages = [ ... ];"></textarea>
+      <div class="hint">Kalau diisi, dipakai menggantikan hasil fetch. Harus persis sama dengan <code>data/manifest.js</code> di repo, kalau tidak patch akan gagal diterapkan.</div>
+    </details>
   </div>
 
   <div class="card">
     <h2><span class="step-num">4</span> Unduh</h2>
-    <div class="hint">Menghasilkan <code>soalin-hasil-konversi.tar.gz</code> berisi <code>data/</code> dan <code>images/</code> sesuai struktur folder Soalin. Push ke repo via Codespaces lalu jalankan:<br><code>tar -xzf soalin-hasil-konversi.tar.gz</code><br>di root repo (isinya akan menimpa/menambah file yang sama).</div>
-    <button class="big" id="downloadBtn" disabled>Unduh .tar.gz</button>
+    <div class="hint">Menghasilkan <code>soalin-hasil-konversi.patch</code> (<code>data/</code>, <code>images/</code>, dan update <code>data/manifest.js</code>). Upload ke root repo di Codespaces, lalu jalankan:<br><code>git am soalin-hasil-konversi.patch</code><br>atau tanpa bikin commit: <code>git apply --index soalin-hasil-konversi.patch</code>. Lalu <code>git push</code>.<br>Re-convert paket yang sudah ada? Hapus dulu: <code>git rm -r data/packages/&lt;id&gt; images/packages/&lt;id&gt;</code> dan commit, baru apply.</div>
+    <button class="big" id="downloadBtn" disabled>Unduh .patch</button>
   </div>
 
   <details>
@@ -630,47 +636,127 @@
   }
 
   // ---------------------------------------------------------------------
-  // TAR (ustar) + gzip packaging, no server involved
+  // git patch packaging (git am / git apply), no server involved
   // ---------------------------------------------------------------------
   function strToBytes(str) { return new TextEncoder().encode(str); }
-  function writeStr(buf, offset, str, maxLen) {
-    const bytes = strToBytes(str);
-    for (let i = 0; i < maxLen; i++) buf[offset + i] = i < bytes.length ? bytes[i] : 0;
-  }
-  function padOctal(num, len) { return num.toString(8).padStart(len - 1, '0') + '\0'; }
+  const ZERO_SHA = '0'.repeat(40);
+  const B85 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~';
 
-  function makeTarHeader(name, size, mtime) {
-    const buf = new Uint8Array(512);
-    writeStr(buf, 0, name.slice(0, 100), 100);
-    writeStr(buf, 100, '0000644\0', 8);
-    writeStr(buf, 108, '0000000\0', 8);
-    writeStr(buf, 116, '0000000\0', 8);
-    writeStr(buf, 124, padOctal(size, 12), 12);
-    writeStr(buf, 136, padOctal(mtime, 12), 12);
-    for (let i = 148; i < 156; i++) buf[i] = 32;
-    buf[156] = '0'.charCodeAt(0);
-    writeStr(buf, 257, 'ustar\0', 6);
-    writeStr(buf, 263, '00', 2);
-    let sum = 0;
-    for (let i = 0; i < 512; i++) sum += buf[i];
-    writeStr(buf, 148, sum.toString(8).padStart(6, '0') + '\0 ', 8);
-    return buf;
-  }
-
-  function buildTar(files) {
-    const parts = [];
-    const mtime = Math.floor(Date.now() / 1000);
-    for (const f of files) {
-      parts.push(makeTarHeader(f.path, f.bytes.length, mtime));
-      parts.push(f.bytes);
-      const pad = (512 - (f.bytes.length % 512)) % 512;
-      if (pad) parts.push(new Uint8Array(pad));
+  function b85(bytes) {
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 4) {
+      let v = 0;
+      for (let j = 0; j < 4; j++) v = v * 256 + (i + j < bytes.length ? bytes[i + j] : 0);
+      let chunk = '';
+      for (let k = 0; k < 5; k++) { chunk = B85[v % 85] + chunk; v = Math.floor(v / 85); }
+      out += chunk;
     }
-    parts.push(new Uint8Array(1024));
-    const total = parts.reduce((a, p) => a + p.length, 0);
-    const out = new Uint8Array(total);
-    let off = 0;
-    for (const p of parts) { out.set(p, off); off += p.length; }
+    return out;
+  }
+  const lenChar = (n) => String.fromCharCode(n <= 26 ? 64 + n : 96 + n - 26);
+
+  async function gitBlobSha(bytes) {
+    const head = strToBytes(`blob ${bytes.length}\0`);
+    const all = new Uint8Array(head.length + bytes.length);
+    all.set(head); all.set(bytes, head.length);
+    const d = new Uint8Array(await crypto.subtle.digest('SHA-1', all));
+    return Array.from(d, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function binaryHunk(bytes) {
+    const z = pako.deflate(bytes);
+    let out = `GIT binary patch\nliteral ${bytes.length}\n`;
+    for (let i = 0; i < z.length; i += 52) {
+      const c = z.subarray(i, i + 52);
+      out += lenChar(c.length) + b85(c) + '\n';
+    }
+    return out + '\nliteral 0\nHcmV?d00001\n\n';
+  }
+
+  const toLines = (t) => (t === '' ? [] : t.replace(/\n$/, '').split('\n'));
+
+  // Line diff -> unified hunks (3 lines context). LCS on the changed middle only.
+  function unifiedHunks(oldText, newText) {
+    const A = toLines(oldText), B = toLines(newText);
+    let pre = 0;
+    while (pre < A.length && pre < B.length && A[pre] === B[pre]) pre++;
+    let suf = 0;
+    while (suf < A.length - pre && suf < B.length - pre && A[A.length - 1 - suf] === B[B.length - 1 - suf]) suf++;
+    const a = A.slice(pre, A.length - suf), b = B.slice(pre, B.length - suf);
+    const mid = [];
+    if (a.length * b.length > 4e6) {
+      a.forEach((x) => mid.push(['-', x])); b.forEach((x) => mid.push(['+', x]));
+    } else {
+      const n = a.length, m = b.length;
+      const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+      for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
+        L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+      let i = 0, j = 0;
+      while (i < n && j < m) {
+        if (a[i] === b[j]) { mid.push([' ', a[i]]); i++; j++; }
+        else if (L[i + 1][j] >= L[i][j + 1]) { mid.push(['-', a[i++]]); }
+        else { mid.push(['+', b[j++]]); }
+      }
+      while (i < n) mid.push(['-', a[i++]]);
+      while (j < m) mid.push(['+', b[j++]]);
+    }
+    const ops = [
+      ...A.slice(0, pre).map((x) => [' ', x]),
+      ...mid,
+      ...A.slice(A.length - suf).map((x) => [' ', x]),
+    ];
+    const C = 3;
+    const changed = [];
+    ops.forEach((o, i) => { if (o[0] !== ' ') changed.push(i); });
+    if (!changed.length) return '';
+    const ranges = [];
+    for (const i of changed) {
+      const lo = Math.max(0, i - C), hi = Math.min(ops.length - 1, i + C);
+      if (ranges.length && lo <= ranges[ranges.length - 1][1] + 1) ranges[ranges.length - 1][1] = hi;
+      else ranges.push([lo, hi]);
+    }
+    let out = '';
+    for (const [lo, hi] of ranges) {
+      let oldStart = 1, newStart = 1;
+      for (let k = 0; k < lo; k++) { if (ops[k][0] !== '+') oldStart++; if (ops[k][0] !== '-') newStart++; }
+      let oc = 0, nc = 0, body = '';
+      for (let k = lo; k <= hi; k++) {
+        const [t, x] = ops[k];
+        if (t !== '+') oc++;
+        if (t !== '-') nc++;
+        body += t + x + '\n';
+      }
+      if (oc === 0) oldStart--;
+      if (nc === 0) newStart--;
+      out += `@@ -${oldStart},${oc} +${newStart},${nc} @@\n` + body;
+    }
+    return out;
+  }
+
+  // f: { path, bytes, text:boolean, oldText?: string|null }  (oldText set => modify, else new file)
+  async function fileDiff(f) {
+    const hdr = `diff --git a/${f.path} b/${f.path}\n`;
+    const newSha = await gitBlobSha(f.bytes);
+    if (f.oldText != null) {
+      const oldSha = await gitBlobSha(strToBytes(f.oldText));
+      if (oldSha === newSha) return '';
+      return hdr + `index ${oldSha}..${newSha} 100644\n--- a/${f.path}\n+++ b/${f.path}\n` +
+        unifiedHunks(f.oldText, new TextDecoder().decode(f.bytes));
+    }
+    let out = hdr + `new file mode 100644\nindex ${ZERO_SHA}..${newSha}\n`;
+    if (f.text) {
+      const lines = toLines(new TextDecoder().decode(f.bytes));
+      out += `--- /dev/null\n+++ b/${f.path}\n@@ -0,0 +1,${lines.length} @@\n` + lines.map((l) => '+' + l + '\n').join('');
+    } else {
+      out += binaryHunk(f.bytes);
+    }
+    return out;
+  }
+
+  async function buildPatch(files, subject) {
+    const date = new Date().toUTCString().replace('GMT', '+0000');
+    let out = `From ${ZERO_SHA} Mon Sep 17 00:00:00 2001\nFrom: Soalin Converter <converter@soalin.invalid>\nDate: ${date}\nSubject: [PATCH] ${subject}\n\n---\n`;
+    for (const f of files) out += await fileDiff(f);
     return out;
   }
 
@@ -819,54 +905,93 @@ export const questions = ${JSON.stringify(allQuestions, null, 2)};
     }
   }
 
-  document.getElementById('downloadBtn').addEventListener('click', () => {
-    if (batch.length === 0) return;
-
-    const files = [];
-    let packages = parseExistingManifest(document.getElementById('existingManifest').value);
-    let legacyItem = null;
-
-    for (const item of batch) {
-      if (!item.usePackageMode) { legacyItem = item; continue; }
-      files.push({ path: item.dataPath, bytes: strToBytes(item.dataContent) });
-      for (const img of item.images) {
-        files.push({ path: `${item.imagesPathPrefix}/${img.filename}`, bytes: img.bytes });
-      }
-      const idx = packages.findIndex((p) => p.id === item.manifestEntry.id);
-      if (idx >= 0) packages[idx] = item.manifestEntry; else packages.push(item.manifestEntry);
-    }
-
-    if (legacyItem) {
-      files.push({ path: legacyItem.dataPath, bytes: strToBytes(legacyItem.dataContent) });
-      for (const img of legacyItem.images) {
-        files.push({ path: `${legacyItem.imagesPathPrefix}/${img.filename}`, bytes: img.bytes });
-      }
-      const legacyCount = batch.filter((b) => !b.usePackageMode).length;
-      if (legacyCount > 1) log('Catatan: ada lebih dari satu file mode-lama di batch — hanya yang terakhir dipakai untuk data/questions.js.', true);
-    }
-
-    if (packages.length > 0) {
-      packages.sort((a, b) => a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
-      const manifestContent = `// File ini DIBUAT/DIKELOLA OTOMATIS oleh konverter Soalin.
+  const MANIFEST_HEADER = `// File ini DIBUAT/DIKELOLA OTOMATIS oleh scripts/convert-docx.js.
 // Berisi daftar semua "paket soal" (hasil konversi docx per kategori).
+// Jangan diedit manual kecuali kamu tahu apa yang kamu lakukan — bisa
+// dihapus/ditimpa lagi saat konversi berikutnya jalan untuk paket yang sama.
 
-export const packages = ${JSON.stringify(packages, null, 2)};
 `;
-      files.push({ path: 'data/manifest.js', bytes: strToBytes(manifestContent) });
-    }
 
-    const tarBytes = buildTar(files);
-    const gz = pako.gzip(tarBytes);
-    const blob = new Blob([gz], { type: 'application/gzip' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'soalin-hasil-konversi.tar.gz';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    log(`Diunduh: soalin-hasil-konversi.tar.gz (${files.length} file).`);
+  // string = isi file, null = tidak ada (404), undefined = gagal fetch
+  async function fetchRepoFile(ref, path) {
+    try {
+      const r = await fetch(`https://raw.githubusercontent.com/${ref.repo}/${ref.branch}/${path}`, { cache: 'no-store' });
+      if (r.status === 404) return null;
+      return r.ok ? await r.text() : undefined;
+    } catch (e) { return undefined; }
+  }
+
+  document.getElementById('downloadBtn').addEventListener('click', async () => {
+    if (batch.length === 0) return;
+    const btn = document.getElementById('downloadBtn');
+    btn.disabled = true;
+    try {
+      const m = document.getElementById('repoRef').value.trim().match(/^([^\/\s]+\/[^@\s]+)(?:@(\S+))?$/);
+      if (!m) { log('Format repo salah. Pakai owner/repo@branch.', true); return; }
+      const ref = { repo: m[1], branch: m[2] || 'main' };
+
+      // manifest lama: textarea (kalau diisi) > fetch dari repo > kosong
+      const pasted = document.getElementById('existingManifest').value;
+      let oldManifest;
+      if (pasted.trim()) oldManifest = pasted.replace(/\r\n/g, '\n');
+      else {
+        oldManifest = await fetchRepoFile(ref, 'data/manifest.js');
+        if (oldManifest === undefined) {
+          log('Gagal mengambil data/manifest.js dari GitHub — patch dibuat seolah file belum ada (akan gagal kalau sudah ada). Tempel manifest manual di Langkah 3.', true);
+          oldManifest = null;
+        }
+      }
+      const packages = oldManifest ? parseExistingManifest(oldManifest) : [];
+
+      const files = [];
+      let legacyItem = null;
+      for (const item of batch) {
+        if (!item.usePackageMode) { legacyItem = item; continue; }
+        if (packages.some((p) => p.id === item.manifestEntry.id)) {
+          log(`Peringatan: paket "${item.manifestEntry.id}" sudah ada di repo. Gambar lama bisa bentrok — hapus paket lama dulu (lihat Langkah 4).`, true);
+        }
+        const oldQ = await fetchRepoFile(ref, item.dataPath);
+        files.push({ path: item.dataPath, bytes: strToBytes(item.dataContent), text: true, oldText: oldQ ?? null });
+        for (const img of item.images) files.push({ path: `${item.imagesPathPrefix}/${img.filename}`, bytes: img.bytes, text: false });
+        const idx = packages.findIndex((p) => p.id === item.manifestEntry.id);
+        if (idx >= 0) packages[idx] = item.manifestEntry; else packages.push(item.manifestEntry);
+      }
+
+      if (legacyItem) {
+        const oldQ = await fetchRepoFile(ref, legacyItem.dataPath);
+        files.push({ path: legacyItem.dataPath, bytes: strToBytes(legacyItem.dataContent), text: true, oldText: oldQ ?? null });
+        for (const img of legacyItem.images) files.push({ path: `${legacyItem.imagesPathPrefix}/${img.filename}`, bytes: img.bytes, text: false });
+        if (batch.filter((b) => !b.usePackageMode).length > 1) log('Catatan: ada lebih dari satu file mode-lama di batch — hanya yang terakhir dipakai untuk data/questions.js.', true);
+      }
+
+      if (packages.length > 0) {
+        packages.sort((a, b) => a.category.localeCompare(b.category) || a.title.localeCompare(b.title));
+        const prefix = oldManifest && oldManifest.includes('export const packages')
+          ? oldManifest.slice(0, oldManifest.indexOf('export const packages'))
+          : MANIFEST_HEADER;
+        const manifestContent = `${prefix}export const packages = ${JSON.stringify(packages, null, 2)};\n`;
+        files.push({ path: 'data/manifest.js', bytes: strToBytes(manifestContent), text: true, oldText: oldManifest ?? null });
+      }
+
+      const titles = batch.map((b) => b.label).join(', ');
+      const subject = `Tambah paket soal: ${titles}`.slice(0, 120);
+      const patch = await buildPatch(files, subject);
+      const blob = new Blob([patch], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'soalin-hasil-konversi.patch';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      log(`Diunduh: soalin-hasil-konversi.patch (${files.length} file, ${(patch.length / 1024).toFixed(0)} KB).`);
+    } catch (e) {
+      log(`Gagal membuat patch: ${e.message}`, true);
+      console.error(e);
+    } finally {
+      btn.disabled = batch.length === 0;
+    }
   });
 })();
 </script>
